@@ -24,6 +24,7 @@ def test_validate_mu_matrix_rules():
     assert validate_mu_matrix([[0.5, 0.2], [0.1, 0.4]]).shape == (2, 2)
     for bad in (
         [[1.0, 2.0]],                 # not 2x2
+        [[0.5, 0.2], [0.1]],          # ragged rows
         [[0.5, 0.2], [0.1, 0.0]],     # non-positive
         [[0.5, 0.2], [0.1, np.inf]],  # non-finite
         [[1.0, 1.0], [1.0, 1.0 + 1e-9]],  # singular-ish: cond > 10000

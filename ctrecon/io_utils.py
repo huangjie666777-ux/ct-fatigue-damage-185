@@ -129,3 +129,27 @@ def validate_params(
         "pixel_spacing_mm": float(pixel_spacing),
         "filter": filter_name,
     }
+
+
+def load_mask_npz(payload: bytes) -> np.ndarray:
+    """Load a boolean section mask from an NPZ upload.
+
+    The archive must contain a boolean array named 'mask'; the shape is
+    checked by the caller against the reconstruction size.
+    """
+    if not zipfile.is_zipfile(io.BytesIO(payload)):
+        raise ValidationError("mask file is not a valid NPZ/ZIP archive")
+    try:
+        with np.load(io.BytesIO(payload), allow_pickle=False) as archive:
+            if "mask" not in archive.files:
+                raise ValidationError("mask NPZ is missing required array 'mask'")
+            mask = archive["mask"]
+    except zipfile.BadZipFile as exc:
+        raise ValidationError("mask file is not a valid NPZ archive") from exc
+    except ValueError as exc:
+        raise ValidationError(f"invalid mask NPZ contents: {exc}") from exc
+    if mask.dtype != np.bool_:
+        raise ValidationError("mask array must be boolean")
+    if mask.ndim != 2:
+        raise ValidationError("mask array must be 2-D")
+    return np.ascontiguousarray(mask)

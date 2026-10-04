@@ -131,3 +131,41 @@ NPZ 数组：
     .venv/bin/python examples/dual_material_demo.py
 
 脚本打印可直接使用的 curl 命令。
+
+## 复合梁截面载荷校核：POST /section_check
+
+在双能分解的基础上做截面强度校核：材料分布 → 体积分数 → 组合截面刚度 → 轴力 + 双向弯曲联合求解 → 各材料拉/压许用比与超限位置。
+
+`multipart/form-data` 字段（几何与 `mu_matrix` 同 /decompose）：
+
+| 字段 | 说明 |
+| --- | --- |
+| `low_file` / `high_file` | 低/高能 NPZ，格式同 /decompose |
+| `mask_file` | NPZ，含与重建同尺寸的**布尔**数组 `mask`；掩膜外不参与截面 |
+| `materials` | JSON，两个唯一命名对象，各含 `reference_density_mg_per_mm3`、`elastic_modulus_mpa`、`allowable_tension_mpa`、`allowable_compression_mpa`（均须有限且严格为正） |
+| `load_cases` | JSON，1–8 个唯一命名工况 `{"name","N","Mx","My"}`，单位 N 与 N·mm，须有限 |
+
+### 力学模型与假设
+
+- **线弹性、完全粘结、平截面假设**：`ε = ε0 + κx·y − κy·x`，有效应力为各材料 `Σ φ_m E_m ε`。
+- 体积分数 `φ_m = ρ_m / ρ_ref_m`；**总和 > 1 时按比例归一，< 1 时保留空隙**；掩膜外置零，原密度图不改。
+- 坐标以图像中心为原点，x 向右、y 向上，取像素中心；`N = ∫σ dA`、`Mx = ∫yσ dA`、`My = ∫−xσ dA`，3×3 刚度矩阵**联合求解**，不忽略耦合项。
+- 每工况、每材料在其存在区域（φ>0 且掩膜内）统计拉/压极值与最大许用比 `max(σ/σ_allow)`，比值 ≤ 1 为合格，并给出超限位置（像素与毫米坐标）。
+
+### 校验（均返回 422，不返回伪结果）
+
+- 掩膜非布尔、尺寸不符、为空；载荷非有限、工况重名或数量超出 1–8；材料参数非正或非有限。
+- 截面奇异（掩膜内材料分布无法平衡轴力与双向弯曲，如单像素截面）直接拒绝。
+- `mu_matrix` 行不齐等非法 JSON 结构同样返回 422（此前会触发 HTTP 500）。
+
+### 输出（ZIP）
+
+- `stress_<工况>_<材料>.npy`：该材料应力图（MPa，float64），材料不存在处为 NaN。
+- `exceedance_<工况>.png`：许用比预览，0–1 灰度、超限像素标红，仅显示用。
+- `report.json`：3×3 刚度矩阵、各工况应变/曲率（ε0、κx、κy）、平衡残差、各材料拉压极值与许用比及超限位置、总体合格结论。
+
+### 解析示例（偏心双材料截面）
+
+    .venv/bin/python examples/section_check_demo.py
+
+生成偏心铝盘 + 塑料盘的低/高能 NPZ 与圆形布尔掩膜，并打印 curl 命令；`service` 工况合格、`overload` 工况超限。

@@ -11,9 +11,10 @@ from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import JSONResponse, Response
 
 from .dual_service import dual_energy_pipeline
-from .io_utils import ValidationError, load_npz
-from .preview import npy_bytes, render_png
+from .io_utils import ValidationError, load_mask_npz, load_npz
+from .preview import npy_bytes, render_check_png, render_png
 from .reconstruct import supported_filters
+from .section_service import section_check_pipeline
 from .service import reconstruct_upload
 
 app = FastAPI(title="Parallel-beam CT FBP reconstruction", version="1.0.0")
@@ -147,4 +148,59 @@ async def decompose(
         content=zip_buffer.getvalue(),
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="decomposition.zip"'},
+    )
+
+
+@app.post("/section_check")
+async def section_check(
+    low_file: UploadFile = File(..., description="NPZ with low-energy intensity, dark, flat"),
+    high_file: UploadFile = File(..., description="NPZ with high-energy intensity, dark, flat"),
+    mask_file: UploadFile = File(..., description="NPZ with boolean array 'mask'"),
+    detector_spacing_mm: float = Form(...),
+    center_index: float = Form(...),
+    output_size: int = Form(...),
+    pixel_spacing_mm: float = Form(...),
+    filter: str = Form("ram-lak"),
+    materials: str = Form(..., description="JSON list of two materials with mechanical properties"),
+    mu_matrix: str = Form(..., description="JSON 2x2 mass attenuation matrix, mm^2/mg"),
+    load_cases: str = Form(..., description="JSON list of 1-8 load cases with N, Mx, My"),
+) -> Response:
+    low_data = load_npz(await low_file.read())
+    high_data = load_npz(await high_file.read())
+    mask = load_mask_npz(await mask_file.read())
+    result = section_check_pipeline(
+        low_data,
+        high_data,
+        mask,
+        {
+            "detector_spacing_mm": detector_spacing_mm,
+            "center_index": center_index,
+            "output_size": output_size,
+            "pixel_spacing_mm": pixel_spacing_mm,
+            "filter": filter,
+        },
+        materials,
+        mu_matrix,
+        load_cases,
+    )
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for case_result in result.case_results:
+            case_name = case_result["name"]
+            for material_name, entry in case_result["materials"].items():
+                zf.writestr(
+                    f"stress_{case_name}_{material_name}.npy",
+                    npy_bytes(entry["_stress_map"]),
+                )
+            zf.writestr(
+                f"exceedance_{case_name}.png",
+                render_check_png(case_result["_ratio_map"]),
+            )
+        zf.writestr("report.json", json.dumps(result.report, indent=2, sort_keys=True))
+
+    return Response(
+        content=zip_buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="section_check.zip"'},
     )
