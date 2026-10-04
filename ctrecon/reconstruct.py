@@ -23,7 +23,10 @@ def _ramp_filter(n_fft: int, detector_spacing: float, name: str) -> np.ndarray:
     """Frequency response sampled on the FFT grid (cycles/mm)."""
     frequencies = np.fft.fftfreq(n_fft, d=detector_spacing)
     nyquist = 0.5 / detector_spacing
-    ramp = 2.0 * np.abs(frequencies)
+    # Response |f| in cycles/mm: the FFT/ifft pair already carries the
+    # 1/(N*d) and d factors of the continuous Fourier transform, so no
+    # extra detector-spacing factor may be applied to the filtered rows.
+    ramp = np.abs(frequencies)
     if name == "hann":
         window = np.where(
             np.abs(frequencies) <= nyquist,
@@ -45,9 +48,8 @@ def filter_sinogram(sinogram: np.ndarray, detector_spacing: float, name: str) ->
     n_fft = _next_fft_length(n_det)
     response = _ramp_filter(n_fft, detector_spacing, name)
     spectrum = np.fft.fft(sinogram, n=n_fft, axis=1)
-    # Trapezoidal integration weight (detector spacing) for the convolution sum.
     filtered = np.fft.ifft(spectrum * response[np.newaxis, :], axis=1).real
-    return filtered[:, :n_det] * detector_spacing
+    return filtered[:, :n_det]
 
 
 def fbp(

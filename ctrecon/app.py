@@ -6,9 +6,11 @@ import io
 import json
 import zipfile
 
+import numpy as np
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import JSONResponse, Response
 
+from .dual_service import dual_energy_pipeline
 from .io_utils import ValidationError, load_npz
 from .preview import npy_bytes, render_png
 from .reconstruct import supported_filters
@@ -76,4 +78,73 @@ async def reconstruct(
         content=zip_buffer.getvalue(),
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="reconstruction.zip"'},
+    )
+
+
+@app.post("/decompose")
+async def decompose(
+    low_file: UploadFile = File(..., description="NPZ with low-energy intensity, dark, flat"),
+    high_file: UploadFile = File(..., description="NPZ with high-energy intensity, dark, flat"),
+    detector_spacing_mm: float = Form(...),
+    center_index: float = Form(...),
+    output_size: int = Form(...),
+    pixel_spacing_mm: float = Form(...),
+    filter: str = Form("ram-lak"),
+    materials: str = Form(..., description='JSON list of two material names'),
+    mu_matrix: str = Form(..., description="JSON 2x2 mass attenuation matrix, mm^2/mg"),
+    slice_thickness_mm: float = Form(...),
+    rois: str = Form(..., description="JSON list of ROI rectangles"),
+) -> Response:
+    low_data = load_npz(await low_file.read())
+    high_data = load_npz(await high_file.read())
+    result = dual_energy_pipeline(
+        low_data,
+        high_data,
+        {
+            "detector_spacing_mm": detector_spacing_mm,
+            "center_index": center_index,
+            "output_size": output_size,
+            "pixel_spacing_mm": pixel_spacing_mm,
+            "filter": filter,
+        },
+        materials,
+        mu_matrix,
+        slice_thickness_mm,
+        rois,
+    )
+
+    metadata = {
+        "parameters": result.params,
+        "rois": result.roi_results,
+        "ranges": {
+            f"density_{name}": {
+                "min": float(np.min(density)),
+                "max": float(np.max(density)),
+            }
+            for name, density in result.densities.items()
+        },
+        "units": {
+            "density": "mg/mm^3",
+            "residual": "linear attenuation per millimeter (mm^-1)",
+            "mass": "milligram",
+            "mu_matrix": "mm^2/mg",
+        },
+        "notes": "preview PNGs use a min/max linear stretch for display only; "
+        "density NPY files are untouched float64 data.",
+    }
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for name, density in result.densities.items():
+            zf.writestr(f"density_{name}.npy", npy_bytes(density))
+        for energy, residual in result.residuals.items():
+            zf.writestr(f"residual_{energy}.npy", npy_bytes(residual))
+        for name, density in result.densities.items():
+            zf.writestr(f"preview_{name}.png", render_png(density))
+        zf.writestr("metadata.json", json.dumps(metadata, indent=2, sort_keys=True))
+
+    return Response(
+        content=zip_buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="decomposition.zip"'},
     )

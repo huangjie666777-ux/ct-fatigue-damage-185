@@ -81,3 +81,53 @@ NPZ 数组：
 
     .venv/bin/python -m compileall -q ctrecon examples tests
     .venv/bin/python -m pytest -q
+
+## FBP 单位修正
+
+滤波响应为 |f|（cycles/mm），FFT/IFFT 对本身携带连续傅里叶变换的 1/(N·d) 与 d 因子，因此滤波结果**不再额外乘探测器间距**。此前版本响应 2|f| 再乘 d，仅在 d=0.5 时碰巧正确；修正后任意探测器间距下输出均为正确的 mm^-1。
+
+## 双能材料分解：POST /decompose
+
+接收**已对齐**的低、高能扫描（不做图像配准），逐像素把两幅衰减图分解为两种材料的非负密度图。
+
+`multipart/form-data` 字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `low_file` / `high_file` | 低/高能 NPZ，格式同 /reconstruct，两者 intensity 形状必须相同 |
+| `detector_spacing_mm`、`center_index`、`output_size`、`pixel_spacing_mm`、`filter` | 共同几何参数，限制同 /reconstruct |
+| `materials` | JSON，两个唯一非空材料名，如 `["aluminum","plastic"]` |
+| `mu_matrix` | JSON 2×2 质量衰减系数矩阵，**行为低/高能、列为材料**，单位 mm²/mg，元素须有限且严格为正 |
+| `slice_thickness_mm` | 截面厚度（毫米，>0） |
+| `rois` | JSON，1–8 个唯一命名矩形 `{"name","x0","y0","x1","y1"}`，像素索引，左上含、右下不含 |
+
+校验（均返回 422）：
+
+- 两份 NPZ 各自沿用 /reconstruct 的全部大小与非法输入限制，且形状必须一致。
+- `mu_matrix` 的 2 范数条件数 > 10000 直接拒绝，不使用正则化掩盖不可辨识性。
+- ROI 越界、空区、重名、数量超出 1–8 均拒绝。
+
+### 线性双材料假设
+
+忽略射束硬化，假设能量 e 的每毫米衰减为材料分密度的线性组合：
+
+    mu_e(x, y) = sum_m mu_matrix[e][m] * rho_m(x, y)
+
+逐像素求精确 2×2 非负最小二乘解 rho >= 0（mg/mm³）：无约束解可行时取之；否则在两个单材料边界解中选平方误差最小者，**不是**把负分量简单截零。衰减图负值全部保留；输出每个能量的残差图（预测 − 观测，mm^-1）。
+
+### 区域计量与输出（ZIP）
+
+每个 ROI 按 `质量 = Σ rho × 像素面积 × 截面厚度` 积分各材料质量（mg），并给出各能量平均残差。ZIP 内容：
+
+- `density_<材料名>.npy`：两份 float64 密度图（mg/mm³）。
+- `residual_low.npy` / `residual_high.npy`：两能量残差图（mm^-1）。
+- `preview_<材料名>.png`：各材料 8 位灰度预览，仅显示用 min/max 拉伸，不改定量数据。
+- `metadata.json`：回显参数、单位及各 ROI 的质量与平均残差。
+
+### 解析示例（两材料混合）
+
+`examples/dual_material_demo.py` 生成两个不同材料圆盘的解析投影（弦长公式按密度加权，再经 mu_matrix 线性组合成低/高能线积分）：
+
+    .venv/bin/python examples/dual_material_demo.py
+
+脚本打印可直接使用的 curl 命令。
