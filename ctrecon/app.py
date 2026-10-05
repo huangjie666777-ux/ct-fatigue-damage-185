@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 import json
+import hashlib
+import re
 import zipfile
 
 import numpy as np
@@ -11,13 +13,38 @@ from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import JSONResponse, Response
 
 from .dual_service import dual_energy_pipeline
-from .io_utils import ValidationError, load_mask_npz, load_npz
+from .fatigue_service import fatigue_pipeline
+from .fatigue import validate_history, validate_repetitions
+from .io_utils import ValidationError, load_history_npz, load_mask_npz, load_npz
 from .preview import npy_bytes, render_check_png, render_png
 from .reconstruct import supported_filters
 from .section_service import section_check_pipeline
 from .service import reconstruct_upload
 
 app = FastAPI(title="Parallel-beam CT FBP reconstruction", version="1.0.0")
+
+
+def _sha256(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _zip_safe(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
+    cleaned = cleaned.strip("._") or "unnamed"
+    return cleaned[:80]
+
+
+def _unique_path(paths: set[str], path: str) -> str:
+    candidate = path
+    match = re.search(r"\.[A-Za-z0-9]+$", path)
+    stem = path[: match.start()] if match else path
+    suffix = path[match.start() :] if match else ""
+    counter = 2
+    while candidate in paths:
+        candidate = f"{stem}_{counter}{suffix}"
+        counter += 1
+    paths.add(candidate)
+    return candidate
 
 
 @app.exception_handler(ValidationError)
@@ -186,15 +213,17 @@ async def section_check(
 
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        used_names = set()
         for case_result in result.case_results:
-            case_name = case_result["name"]
+            case_name = _zip_safe(case_result["name"])
             for material_name, entry in case_result["materials"].items():
-                zf.writestr(
-                    f"stress_{case_name}_{material_name}.npy",
-                    npy_bytes(entry["_stress_map"]),
+                path = _unique_path(
+                    used_names,
+                    f"stress_{case_name}_{_zip_safe(material_name)}.npy",
                 )
+                zf.writestr(path, npy_bytes(entry["_stress_map"]))
             zf.writestr(
-                f"exceedance_{case_name}.png",
+                _unique_path(used_names, f"exceedance_{case_name}.png"),
                 render_check_png(case_result["_ratio_map"]),
             )
         zf.writestr("report.json", json.dumps(result.report, indent=2, sort_keys=True))
@@ -203,4 +232,66 @@ async def section_check(
         content=zip_buffer.getvalue(),
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="section_check.zip"'},
+    )
+
+
+@app.post("/fatigue")
+async def fatigue(
+    low_file: UploadFile = File(...),
+    high_file: UploadFile = File(...),
+    mask_file: UploadFile = File(...),
+    history_file: UploadFile = File(..., description="NPZ with ordered N, Mx, My arrays"),
+    detector_spacing_mm: float = Form(...),
+    center_index: float = Form(...),
+    output_size: int = Form(...),
+    pixel_spacing_mm: float = Form(...),
+    filter: str = Form("ram-lak"),
+    materials: str = Form(..., description="JSON two materials with Sref, Nref, m, Su"),
+    mu_matrix: str = Form(...),
+    R: str = Form(..., description="positive integer block repetitions"),
+) -> Response:
+    low_payload = await low_file.read()
+    high_payload = await high_file.read()
+    mask_payload = await mask_file.read()
+    history_payload = await history_file.read()
+
+    low_data = load_npz(low_payload)
+    high_data = load_npz(high_payload)
+    mask = load_mask_npz(mask_payload)
+    history = validate_history(load_history_npz(history_payload))
+    repetitions = validate_repetitions(R)
+    result = fatigue_pipeline(
+        low_data,
+        high_data,
+        mask,
+        history,
+        {
+            "detector_spacing_mm": detector_spacing_mm,
+            "center_index": center_index,
+            "output_size": output_size,
+            "pixel_spacing_mm": pixel_spacing_mm,
+            "filter": filter,
+        },
+        materials,
+        mu_matrix,
+        repetitions,
+        {
+            "low_file_sha256": _sha256(low_payload),
+            "high_file_sha256": _sha256(high_payload),
+            "mask_file_sha256": _sha256(mask_payload),
+            "history_file_sha256": _sha256(history_payload),
+        },
+    )
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for name, damage in result.damage_maps.items():
+            zf.writestr(f"damage_{_zip_safe(name)}.npy", npy_bytes(damage))
+        zf.writestr("damage_preview.png", render_check_png(result.combined_map))
+        zf.writestr("fatigue_report.json", json.dumps(result.report, indent=2, sort_keys=True, allow_nan=False))
+
+    return Response(
+        content=zip_buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="fatigue.zip"'},
     )

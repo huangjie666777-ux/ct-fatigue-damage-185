@@ -153,3 +153,23 @@ def load_mask_npz(payload: bytes) -> np.ndarray:
     if mask.ndim != 2:
         raise ValidationError("mask array must be 2-D")
     return np.ascontiguousarray(mask)
+
+
+def load_history_npz(payload: bytes) -> dict[str, np.ndarray]:
+    """Load ordered synchronized N, Mx and My history arrays from NPZ."""
+    if not zipfile.is_zipfile(io.BytesIO(payload)):
+        raise ValidationError("history file is not a valid NPZ/ZIP archive")
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+            total = sum(info.file_size for info in zf.infolist())
+            if total > MAX_UNCOMPRESSED_BYTES:
+                raise ValidationError(
+                    f"uncompressed payload {total} bytes exceeds limit "
+                    f"{MAX_UNCOMPRESSED_BYTES} bytes"
+                )
+        with np.load(io.BytesIO(payload), allow_pickle=False) as archive:
+            return {name: archive[name] for name in ("N", "Mx", "My") if name in archive.files}
+    except zipfile.BadZipFile as exc:
+        raise ValidationError("history file is not a valid NPZ archive") from exc
+    except ValueError as exc:
+        raise ValidationError(f"invalid history NPZ contents: {exc}") from exc

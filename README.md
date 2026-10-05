@@ -169,3 +169,43 @@ NPZ 数组：
     .venv/bin/python examples/section_check_demo.py
 
 生成偏心铝盘 + 塑料盘的低/高能 NPZ 与圆形布尔掩膜，并打印 curl 命令；`service` 工况合格、`overload` 工况超限。
+
+## 复合梁循环疲劳：POST /fatigue
+
+在 `/section_check` 同一材料分解、体积分数、坐标和耦合刚度之后新增疲劳分析；旧接口路径、表单字段与 ZIP 文件保持不变。疲劳端点只接收 `output_size <= 64` 的正方形网格。
+
+### 输入（multipart/form-data）
+
+| 字段 | 说明 |
+| --- | --- |
+| `low_file` / `high_file` | 低/高能 NPZ，沿用 `/reconstruct` 的 `intensity`、`dark`、`flat` |
+| `mask_file` | NPZ，布尔数组 `mask`，尺寸必须等于重建网格 |
+| `history_file` | NPZ，含同长度、有序、有限的一维数组 `N`、`Mx`、`My` |
+| `R` | 块重复次数；必须是纯十进制正整数（无小数点、无科学计数法） |
+| 几何字段 | `detector_spacing_mm`、`center_index`、`output_size`、`pixel_spacing_mm`、`filter` |
+| `mu_matrix` | 与 `/section_check` 相同的 2×2 衰减矩阵 |
+| `materials` | 两个材料对象，除原有物性外，还需正有限值 `Sref`、`Nref`、`m`、`Su`，Sref 与 Su 均为 MPa |
+
+历史数组长度必须为 2–2000，三个数组按相同时间顺序配对。单位为：N（N，拉为正）、Mx/My（N·mm）、所有应力和疲劳强度参数（MPa）。非有限值、对象数组、布尔历史数组、长度不匹配、非正整数 `R`、空掩膜、奇异截面或超过 64×64 的疲劳网格均返回 HTTP 422。
+
+### 计数与损伤假设
+
+- 每个历史步将完整的同步 `[N, Mx, My]` 联合代入同一个 3×3 耦合刚度方程，得到共同应变场；不能分别对 N、Mx、My 计数后相加。
+- 各材料在其存在像素（φ>0）的应力历史为 `σ_m(x,y,t)=E_m ε(x,y,t)`。
+- 逐像素先删除相邻连续重复值，保留首尾端点和峰谷转折；然后按 ASTM E1049 三反转雨流法计数。闭合循环计数 1，残余反转计数 0.5；不连接首尾。
+- 循环幅值 `a=(σmax−σmin)/2`、均值 `s=(σmax+σmin)/2`；零幅值不产生损伤。
+- Goodman 校正：`a' = a / (1 − max(s,0)/Su)`；若分母小于等于 0，拒绝整个请求。
+- S-N 寿命：`Nf = Nref (Sref/a')^m`；Miner 单块损伤 `D=Σ count/Nf`，累计损伤为 `R·D`。
+- 按相互独立的重复块假设，JSON 中 `total_block_life = 1/D` 表示该载荷块可重复的块数；若最大损伤点 `D=0`，返回 `null` 且 `zero_damage=true`。另给 `cumulative_life_in_repeated_blocks=(1/D)/R`，仅用于把寿命换算到“重复后块”尺度。
+
+### 输出（ZIP）
+
+- `damage_<材料名>.npy`：该材料存在区域的累计损伤 `R·D`，不存在处为 NaN。
+- `damage_preview.png`：两材料逐像素最大单块损伤的显示预览；0–1 映射灰度，超过 1 标红，不替代 NPY。
+- `fatigue_report.json`：输入 SHA-256、刚度矩阵、材料参数、最大累计损伤、材料名、像素行列与毫米坐标、单块损伤、总块寿命、该最大点的全部雨流循环（幅值、均值、Goodman 幅值、count、Nf、损伤）、单位和假设。
+
+### 解析示例与 curl
+
+    .venv/bin/python examples/fatigue_demo.py
+
+脚本生成 64×64 疲劳截面用低/高能 NPZ、掩膜和同步载荷历史 NPZ，并打印可直接执行的 curl 命令。

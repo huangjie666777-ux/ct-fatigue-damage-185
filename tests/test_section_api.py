@@ -166,3 +166,18 @@ def test_section_check_rejects_singular_section():
     mask[64, 64] = True
     response = _post(low, high, _npz(mask=mask))
     assert response.status_code == 422
+
+
+def test_section_check_zip_keeps_sanitized_duplicate_names():
+    low, high = _phantom_npzs()
+    duplicate_cases = [
+        {"name": "service?", "N": 0.0, "Mx": 0.0, "My": 0.0},
+        {"name": "service!", "N": 0.0, "Mx": 0.0, "My": 0.0},
+    ]
+    response = _post(low, high, _mask_npz(), load_cases=json.dumps(duplicate_cases))
+    assert response.status_code == 200
+    names = set(zipfile.ZipFile(io.BytesIO(response.content)).namelist())
+    assert "stress_service_aluminum.npy" in names
+    assert "stress_service_aluminum_2.npy" in names
+    assert "exceedance_service.png" in names
+    assert "exceedance_service_2.png" in names
