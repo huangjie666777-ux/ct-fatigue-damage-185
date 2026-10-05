@@ -102,15 +102,16 @@ def validate_params(
     output_size: int,
     pixel_spacing: float,
     filter_name: str,
+    max_output_size: int = MAX_OUTPUT_SIZE,
 ) -> dict:
     """Validate scalar reconstruction parameters and return cleaned values."""
     from .reconstruct import supported_filters
 
     if isinstance(output_size, bool) or not isinstance(output_size, int):
         raise ValidationError("output_size must be an integer")
-    if not (1 <= output_size <= MAX_OUTPUT_SIZE):
+    if not (1 <= output_size <= max_output_size):
         raise ValidationError(
-            f"output_size must be in [1, {MAX_OUTPUT_SIZE}], got {output_size}"
+            f"output_size must be in [1, {max_output_size}], got {output_size}"
         )
     if not np.isfinite(detector_spacing) or detector_spacing <= 0:
         raise ValidationError("detector_spacing must be a finite positive number")

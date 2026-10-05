@@ -49,12 +49,14 @@ def reconstruct_densities(
             f"got {low_data.intensity.shape} and {high_data.intensity.shape}"
         )
 
+    max_size = geometry.get("max_output_size")
     clean = validate_params(
         geometry["detector_spacing_mm"],
         geometry["center_index"],
         geometry["output_size"],
         geometry["pixel_spacing_mm"],
         geometry["filter"],
+        max_output_size=max_size if max_size is not None else 256,
     )
     materials = validate_materials(_parse_json_field(materials_raw, "materials"))
     matrix = validate_mu_matrix(_parse_json_field(mu_matrix_raw, "mu_matrix"))

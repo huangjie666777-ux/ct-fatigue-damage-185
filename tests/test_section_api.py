@@ -166,3 +166,35 @@ def test_section_check_rejects_singular_section():
     mask[64, 64] = True
     response = _post(low, high, _npz(mask=mask))
     assert response.status_code == 422
+
+
+def test_section_check_zip_name_collision_disambiguated():
+    # ("a_b", "c") and ("a", "b_c") both used to map to
+    # 'stress_a_b_c.npy', silently overwriting one stress map.
+    low, high = _phantom_npzs()
+    props = [
+        {**MATERIAL_PROPS[0], "name": "c"},
+        {**MATERIAL_PROPS[1], "name": "b_c"},
+    ]
+    cases = [
+        {"name": "a_b", "N": 1.0e3, "Mx": 0.0, "My": 0.0},
+        {"name": "a", "N": 1.0e3, "Mx": 0.0, "My": 0.0},
+    ]
+    response = _post(
+        low,
+        high,
+        _mask_npz(),
+        materials=json.dumps(props),
+        load_cases=json.dumps(cases),
+    )
+    assert response.status_code == 200
+    bundle = zipfile.ZipFile(io.BytesIO(response.content))
+    names = bundle.namelist()
+    assert len(names) == len(set(names))
+    # Four distinct stress maps must survive; report links each combination.
+    stress_names = [name for name in names if name.startswith("stress_")]
+    assert len(stress_names) == 4
+    report = json.loads(bundle.read("report.json"))
+    links = report["linkage"]["files"]
+    assert links["stress:a_b:c"] != links["stress:a:b_c"]
+    assert all(key in links for key in ("stress:a_b:c", "stress:a:b_c"))

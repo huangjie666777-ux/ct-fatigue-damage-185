@@ -44,3 +44,25 @@ def render_check_png(ratio_map: np.ndarray) -> bytes:
     buffer = io.BytesIO()
     Image.fromarray(rgb, mode="RGB").save(buffer, format="PNG")
     return buffer.getvalue()
+
+
+def render_damage_png(damage_map: np.ndarray) -> bytes:
+    """RGB Miner-damage preview on a log10 scale.
+
+    Damage values <= 0 render black; positive damage up to 1 (failure in a
+    single block) spans grayscale; pixels at or beyond D=1 are marked red.
+    NaN pixels (material absent) render black. Display-only.
+    """
+    rgb = np.zeros((*damage_map.shape, 3), dtype=np.uint8)
+    positive = np.isfinite(damage_map) & (damage_map > 0.0)
+    if positive.any():
+        scaled = np.clip(np.log10(np.where(positive, damage_map, 1.0)), -6.0, 0.0)
+        gray = np.clip(np.rint((scaled + 6.0) / 6.0 * 255.0), 0, 255).astype(np.uint8)
+        rgb[..., 0] = np.where(positive, gray, 0)
+        rgb[..., 1] = np.where(positive, gray, 0)
+        rgb[..., 2] = np.where(positive, gray, 0)
+    failed = np.isfinite(damage_map) & (damage_map >= 1.0)
+    rgb[failed] = np.array([255, 0, 0], dtype=np.uint8)
+    buffer = io.BytesIO()
+    Image.fromarray(rgb, mode="RGB").save(buffer, format="PNG")
+    return buffer.getvalue()

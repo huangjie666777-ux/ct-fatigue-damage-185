@@ -169,3 +169,60 @@ NPZ 数组：
     .venv/bin/python examples/section_check_demo.py
 
 生成偏心铝盘 + 塑料盘的低/高能 NPZ 与圆形布尔掩膜，并打印 curl 命令；`service` 工况合格、`overload` 工况超限。
+
+### 应力 ZIP 文件名修复
+
+此前应力图命名为 stress_<工况>_<材料>.npy，当工况/材料名含下划线导致组合歧义（如工况 a_b+材料 c 与工况 a+材料 b_c）时会互相覆盖。现在默认仍用原文件名（旧接口的正常情况完全兼容），仅在检测到任意重名/歧义时统一改写为带序号的 stress_<工况序号>_<工况>_<材料序号>_<材料>.npy（预览图同理）；report.json 的 linkage.files 给出每个“工况×材料”组合对应的实际文件名，同时记录低/高能 NPZ 与掩膜的 SHA-256，供历史、截面与交付物跨文件核对。
+
+## 复合梁循环疲劳：POST /fatigue_check
+
+在材料分解 → 体积分数 → 耦合刚度的同一力学模型上，对一段有序的 (N, Mx, My) 历史恢复各材料在其存在像素处的应力历史，逐像素做 ASTM E1049 雨流计数、Goodman 平均应力校正与 Miner 线性累积。旧接口 /reconstruct、/decompose、/section_check 全部保留不变。
+
+multipart/form-data 字段（几何与 mu_matrix 同 /decompose）：
+
+| 字段 | 说明 |
+| --- | --- |
+| low_file / high_file / mask_file | 同 /section_check 的低/高能 NPZ 与布尔掩膜 NPZ |
+| materials | JSON 两个材料对象，除截面校核的全部字段外，另加 Sref、Nref、m、Su，均须有限且严格为正，应力单位 MPa |
+| history | JSON 有序数组，2–2000 个点 {"N","Mx","My"}（N、N·mm，有限）；顺序即加载时间顺序，不允许重排 |
+| R | 块重复次数，正整数（布尔值拒绝） |
+| 网格 | output_size 上限 64（1–64），其余几何限制同前 |
+
+非法输入（点数越界、缺键、非数/NaN、R 非正整数、网格超 64、材料参数非正、Goodman 分母非正等）一律返回 HTTP 422，不输出伪结果。
+
+### 应力历史恢复（不分别计数载荷分量）
+
+- 对历史中每个时间点，用同一个 3×3 耦合刚度矩阵联合求解 [eps0, kx, ky]（eps = eps0 + kx·y − ky·x），再按各材料 σ_m = E_m·ε 得到该像素的应力时间序列。
+- 雨流计数作用于合成后的应力标量历史本身；N、Mx、My 绝不分开计数后相加。
+- 仅在材料存在处（φ_m > 0 且掩膜内）计算，材料不存在处 NPY 为 NaN。
+
+### 雨流计数（ASTM E1049-85）
+
+1. 逐像素先压缩连续重复值（平台取一点），保留首尾端点与全部内部转折（斜率变号点）。
+2. 按 ASTM E1049 第 5.4.4 节三点规则计数：闭合循环计 1，剩余残段各计 0.5；不把首尾连接闭合。
+3. 每个循环输出幅值 a = 半极差（MPa）与均值 s = (峰+谷)/2；零幅值不参与任何损伤（不会除零）。
+
+### Goodman、S-N 与 Miner
+
+Goodman 校正（拉均值才校正）：
+
+    a' = a / (1 − max(s, 0) / Su)
+
+- 分母 ≤ 0（即 s ≥ Su）的非零循环直接 422 拒绝，错误信息带材料与像素位置。
+- S-N 曲线：Nf = Nref · (Sref / a')^m。
+- Miner 单块损伤：D = Σ count / Nf（闭合循环 count=1，残余 count=0.5）。
+- 块按彼此独立、完全相同假设重复：累计损伤 = R·D；总块寿命 = 1/D。
+- 该点 D = 0 时寿命返回 JSON null，并显式给出 "zero_damage": true。
+
+### 输出（ZIP）与跨文件联动
+
+- damage_<序号>_<材料>.npy：各材料累计损伤 R·D 的 float64 图，材料不存在处 NaN。
+- damage_preview_<序号>_<材料>.png：log10 损伤预览（仅显示用），D ≥ 1 像素标红。
+- report.json：刚度矩阵、完整回显历史与 R、各材料最大（单块/累计）损伤及位置、全截面最大累计损伤点（材料、像素/毫米坐标、单块 D、累计 R·D、总块寿命 1/D 或 null、zero_damage 标志、该点全部循环明细：count/a/s/a'/Nf/损伤贡献），以及假设与单位。
+- report.json 的 linkage 记录低/高能 NPZ、掩膜 NPZ、历史的 SHA-256，以及各交付文件名映射，实现历史、原截面输入与 ZIP 交付物跨文件核对。
+
+### 解析示例（疲劳）
+
+    .venv/bin/python examples/fatigue_demo.py
+
+生成 48×48 偏心双材料截面的低/高能 NPZ、掩膜 NPZ 与 8 点有序历史（R=100），并打印可直接运行的 curl 命令。
